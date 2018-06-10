@@ -1,0 +1,4 @@
+*.swp
+*.swo
+.local_info.*
+venv
