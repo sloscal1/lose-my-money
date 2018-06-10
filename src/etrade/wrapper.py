@@ -19,7 +19,7 @@ from Crypto import Random
 class ETradeAPI(object):
     """
     Encapsulates the authentication routines.
-    
+
     Attributes:
         oauth_consumer_key (str): consumer token (app key given by E*Trade).
         consumer_secret (str): consumer secret (app secret given by E*Trade).
@@ -45,6 +45,46 @@ class ETradeAPI(object):
         file_handler = logging.FileHandler(Path(logfile).expanduser())
         root_logger.addHandler(file_handler)
 
+    def user_auth(self, username, password, app_auth_token):
+        """Simulate user interacting with the E*Trade web API login form.
+
+        Args:
+            username (str): valid E*Trade username
+            password (str): valid E*Trade password
+            app_auth_token (str): Token given after app authenticates against E*Trade.
+        Returns:
+            str 5-character verification code displayed to the user in a normal
+                login routine.
+        """
+        auth_url = (f'https://us.etrade.com/e/t/etws/authorize?'
+                    f'key={self.oauth_consumer_key}&token={app_auth_token}')
+        with requests.Session() as user_sess:
+            # Get to the login page
+            resp = user_sess.get(auth_url)
+            page = BeautifulSoup(resp.text, 'html.parser')
+            # if has recently logged in, they'll go to the second step automatically
+            # if page.find('input', attrs={'ID': 'user_orig'}):
+            payload = {'USE_IDENTITY_TOKEN': 'false',
+                       'USER': username,
+                       'PASSWORD': password,
+                       'TARGET': ('/e/t/user/xfr?Target=/e/t/etws/authorize'
+                                  f'?key={self.oauth_consumer_key}'
+                                  f'&token={app_auth_token}')}
+            resp = user_sess.post('https://us.etrade.com/login?b',
+                                  data=payload)
+            page = BeautifulSoup(resp.text, 'html.parser')
+            # Parse the Accept/Decline page
+            value = page.find('input', attrs={'name': 'stk1'})['value']
+            payload = {'stk1': value,
+                       'formpost': 1,
+                       'submit': 'Accept'}
+            resp = user_sess.post('https://us.etrade.com/e/t/etws/TradingAPICustomerInfo',
+                                  data=payload)
+            # Parse the verification code page
+            page = BeautifulSoup(resp.text, 'html.parser')
+            verif = page.find('input', attrs={'type': 'text'})['value'].strip()
+        return verif
+
     def init_access(self, username, password):
         """ Get an access token to create a session for API interactions.
 
@@ -57,42 +97,16 @@ class ETradeAPI(object):
                 object to facilitate API calls.
         """
         auth = OAuth1Session(
-            self.oauth_consumer_key, client_secret=self.consumer_secret,
+            self.oauth_consumer_key,
+            client_secret=self.consumer_secret,
             callback_uri='oob')
         response = auth.fetch_request_token(f'{self.prod_url}oauth/request_token')
         owner_token = response.get('oauth_token')
-        # owner_secret = response.get('oauth_token_secret')
-        auth_url = (f'https://us.etrade.com/e/t/etws/authorize?'
-                    f'key={self.oauth_consumer_key}&token={owner_token}')
-        with requests.Session() as user_sess:
-            # Get to the login page
-            r = user_sess.get(auth_url)
-            page = BeautifulSoup(r.text, 'html.parser')
-            # if has recently logged in, they'll go to the second step automatically
-            # if page.find('input', attrs={'ID': 'user_orig'}):
-            print('Sending password...')
-            payload = {'USE_IDENTITY_TOKEN': 'false',
-                       'USER': username,
-                       'PASSWORD': password,
-                       'TARGET': ('/e/t/user/xfr?Target=/e/t/etws/authorize'
-                                  f'?key={self.oauth_consumer_key}'
-                                  f'&token={owner_token}')}
-            r = user_sess.post('https://us.etrade.com/login?b',
-                               data=payload)
-            page = BeautifulSoup(r.text, 'html.parser')
-            # Parse the Accept/Decline page
-            print('Sending accept')
-            value = page.find('input', attrs={'name': 'stk1'})['value']
-            payload = {'stk1': value,
-                       'formpost': 1,
-                       'submit': 'Accept'}
-            r = user_sess.post('https://us.etrade.com/e/t/etws/TradingAPICustomerInfo',
-                               data=payload)
-            # Parse the verification code page
-            page = BeautifulSoup(r.text, 'html.parser')
-            verif = page.find('input', attrs={'type': 'text'})['value'].strip()
         response = auth.fetch_access_token(f'{self.prod_url}oauth/access_token',
-                                           verifier=verif)
+                                           verifier=self.user_auth(
+                                               username,
+                                               password,
+                                               owner_token))
         access_token = response.get('oauth_token')
         access_secret = response.get('oauth_token_secret')
         self.oauth = OAuth1Session(
@@ -130,9 +144,9 @@ class TerminalDriver(object):
     TODO: pull in the `E*Trade developer pages`_ since they are organized
     by text module and method names (although not identical) and
     we could simple pull and parse this information to have handy.
-        
+
     .. _E*Trade developer pages: https://developer.etrade.com/ctnt/dev-portal/getDetail?contentUri=V0_Documentation-AccountsAPI-ListAccounts
-    
+
     Attributes:
         config_file (str): the name of the configuration file.
         privkey (str): the location in the filesystem of the private RSA key.
@@ -165,11 +179,11 @@ class TerminalDriver(object):
         Returns:
             Encrypted bytestring ciphertext of ``value``.
         """
-        h = SHA.new(value.encode(enc))
+        hashed = SHA.new(value.encode(enc))
         key = RSA.importKey(open(key_loc, 'r').read())
         cipher = PKCS1_v1_5.new(key)
-        return cipher.encrypt(value.encode(enc)+h.digest())
-        
+        return cipher.encrypt(value.encode(enc) + hashed.digest())
+
     @staticmethod
     def _decrypt(ciphertext, key_loc, *, enc='utf8'):
         """ Decrypt ``ciphertext`` using the key found at ``key_loc``.
@@ -190,9 +204,9 @@ class TerminalDriver(object):
         dsize = SHA.digest_size
         sentinel = Random.new().read(15+dsize)
         cipher = PKCS1_v1_5.new(key)
-        return cipher.decrypt(ciphertext, sentinel)[:-dsize].decode(enc)
-    
-    def _parse_args(self):
+        return cipher.decrypt(ciphertext, sentinel)[:-1*dsize].decode(enc)
+
+    def parse_args(self):
         """Parse arguments and configuration file parameters.
 
         Assumes that the public key is the same as private key with .pub suffixed.
@@ -235,18 +249,16 @@ class TerminalDriver(object):
         """
         # Get the info we need to get access tokens to start making
         # API calls
-        config = self._parse_args()
-        client_key = config.get('secret', 'oauth_consumer_key')
-        client_secret = config.get('secret', 'consumer_secret')
+        config = self.parse_args()
         username = TerminalDriver._decrypt(
-                open(config.get('etrade', 'username'), 'rb').read(),
-                self.privkey)
+            open(config.get('etrade', 'username'), 'rb').read(),
+            self.privkey)
         password = TerminalDriver._decrypt(
-                open(config.get('etrade', 'password'), 'rb').read(),
-                self.privkey)
+            open(config.get('etrade', 'password'), 'rb').read(),
+            self.privkey)
         # Initiate the connections with E*Trade
-        sess = ETradeAPI(client_key,
-                        client_secret)
+        sess = ETradeAPI(config.get('secret', 'oauth_consumer_key'),
+                         config.get('secret', 'consumer_secret'))
         sess.init_access(username, password)
 
         # Do the command line driver work
@@ -290,5 +302,4 @@ class TerminalDriver(object):
 # If there are, see the buy price.
 # If the current price > buy price, then sell.
 if __name__ == '__main__':
-    driver = TerminalDriver(sys.argv)
-    driver.loop()
+    TerminalDriver(sys.argv).loop()
