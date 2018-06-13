@@ -260,6 +260,9 @@ class TerminalDriver(object):
         sess = ETradeAPI(config.get('secret', 'oauth_consumer_key'),
                          config.get('secret', 'consumer_secret'))
         sess.init_access(username, password)
+        
+        post_methods = ['previewequityorder', 'placeequityorder']
+        account_methods = ['orderlist']
 
         # Do the command line driver work
         while True:
@@ -273,14 +276,10 @@ class TerminalDriver(object):
                 if names[-1] not in quits:
                     values.append(input(f'Enter {names[-1]} value: '))
             base = sess.generic_call(module, method)
-            # If there are parameters, insert a /
-            if len(names) > 1:
-                base += '/'
             params = dict(zip(names, values))
-            # If accountId is present, it always goes first
-            if 'accountId' in params:
-                base += params['accountId']
-            params.pop('accountId', None)
+            if method in account_methods:
+                base += f'/{params["accountId"]}'
+                params.pop('accountId', None)
             # Quote takes a list of , separated stock symbols.
             if method == 'quote':
                 if '' not in params:
@@ -290,7 +289,10 @@ class TerminalDriver(object):
                 params.pop('', None)
             print(base)
             print(params)
-            response = sess.oauth.get(base+'.json', params=params)
+            if method in post_methods:
+                response = sess.oauth.post(base+'.json', params=params)
+            else:
+                response = sess.oauth.get(base+'.json', params=params)
             print(response.status_code)
             if response.status_code == 200:
                 print(response.content)
